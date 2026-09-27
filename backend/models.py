@@ -53,7 +53,6 @@ class DuplicateReq(BaseModel):
 # ---------------------------------------------------------------- 聊天
 class ChatPostReq(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
-    kind: str = Field(default="msg")      # msg | system
 
 
 # ---------------------------------------------------------------- 模板

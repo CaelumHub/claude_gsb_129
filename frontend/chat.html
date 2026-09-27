@@ -134,8 +134,10 @@ async function main() {
   let currentBoardId = null;
   let socket = null;
   let myRole = '';
-  let messages = [];                 // 当前房间已加载消息(升序)
+  let messages = [];                 // 当前房间已加载消息(按 ts,id 升序)
   const renderedIds = new Set();
+  const msgEls = new Map();
+  const daySepEls = new Map();
   let hasMore = false;
   let loadingOlder = false;
   const members = new Map();         // client_id → presence
@@ -175,13 +177,16 @@ async function main() {
   }
 
   /* ------------------------------------------------------------ 消息渲染 */
-  function dayLabel(ts) {
+  function dayKey(ts) {
     const d = new Date(ts);
+    return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  }
+
+  function dayLabel(ts) {
     const today = new Date();
-    const yest = new Date(Date.now() - 86400_000);
-    const key = (x) => `${x.getFullYear()}-${x.getMonth()}-${x.getDate()}`;
-    if (key(d) === key(today)) return '今天';
-    if (key(d) === key(yest)) return '昨天';
+    const yest = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+    if (dayKey(ts) === dayKey(Date.now())) return '今天';
+    if (dayKey(ts) === dayKey(yest.getTime())) return '昨天';
     return fmtTime(ts).slice(0, 10);
   }
 
@@ -211,21 +216,40 @@ async function main() {
     return $list.scrollHeight - $list.scrollTop - $list.clientHeight < 90;
   }
 
+  function sortMessages(list) {
+    return list.sort((a, b) =>
+      (a.ts || 0) - (b.ts || 0) || String(a.id || '').localeCompare(String(b.id || '')));
+  }
+
   function appendMessage(msg, forceScroll = false) {
     if (!msg || renderedIds.has(msg.id)) return;
     renderedIds.add(msg.id);
     messages.push(msg);
+    sortMessages(messages);
     document.getElementById('msg-empty')?.remove();
     document.querySelector('.load-more')?.remove();
-    const last = messages[messages.length - 2];
-    if (!last || dayLabel(last.ts) !== dayLabel(msg.ts)) {
-      const sep = document.createElement('div');
-      sep.className = 'day-sep';
-      sep.textContent = dayLabel(msg.ts);
-      $list.appendChild(sep);
+
+    const index = messages.findIndex((item) => item.id === msg.id);
+    const next = messages[index + 1];
+    const day = dayKey(msg.ts);
+    let separator = daySepEls.get(day);
+    if (!separator) {
+      separator = document.createElement('div');
+      separator.className = 'day-sep';
+      separator.textContent = dayLabel(msg.ts);
+      daySepEls.set(day, separator);
+      const nextSeparator = next ? daySepEls.get(dayKey(next.ts)) : null;
+      if (nextSeparator) $list.insertBefore(separator, nextSeparator);
+      else $list.appendChild(separator);
     }
+
+    const el = messageEl(msg);
+    msgEls.set(msg.id, el);
+    const ref = next ? msgEls.get(next.id) : null;
+    if (ref) $list.insertBefore(el, ref);
+    else $list.appendChild(el);
+
     const stick = forceScroll || nearBottom() || msg.user === me.username;
-    $list.appendChild(messageEl(msg));
     if (stick) $list.scrollTop = $list.scrollHeight;
     if (hasMore) renderLoadMore();
   }
@@ -252,6 +276,9 @@ async function main() {
   function renderAll() {
     $list.innerHTML = '';
     renderedIds.clear();
+    msgEls.clear();
+    daySepEls.clear();
+    sortMessages(messages);
     if (!messages.length) {
       $list.innerHTML = `<div class="empty-state" id="msg-empty">
         <div class="icon">🕊</div><div class="title">还没有消息</div><div>说点什么开始讨论吧</div></div>`;
@@ -265,10 +292,13 @@ async function main() {
         const sep = document.createElement('div');
         sep.className = 'day-sep';
         sep.textContent = day;
+        daySepEls.set(dayKey(msg.ts), sep);
         $list.appendChild(sep);
       }
       renderedIds.add(msg.id);
-      $list.appendChild(messageEl(msg));
+      const el = messageEl(msg);
+      msgEls.set(msg.id, el);
+      $list.appendChild(el);
     }
     if (hasMore) renderLoadMore();
     $list.scrollTop = $list.scrollHeight;
@@ -277,7 +307,7 @@ async function main() {
   async function loadHistory(boardId) {
     try {
       const data = await Api.chat.list(boardId, { limit: 100 });
-      messages = data.messages || [];
+      messages = sortMessages(data.messages || []);
       hasMore = !!data.has_more;
       renderAll();
     } catch (err) {
@@ -290,9 +320,16 @@ async function main() {
     loadingOlder = true;
     const prevHeight = $list.scrollHeight;
     try {
-      const data = await Api.chat.list(currentBoardId, { before: messages[0].ts, limit: 100 });
+      const oldest = messages[0];
+      const data = await Api.chat.list(currentBoardId, {
+        before: oldest.ts, before_id: oldest.id, limit: 100,
+      });
       hasMore = !!data.has_more;
-      messages = [...(data.messages || []), ...messages];
+      const byId = new Map();
+      for (const m of [...(data.messages || []), ...messages]) {
+        if (!byId.has(m.id)) byId.set(m.id, m);
+      }
+      messages = sortMessages([...byId.values()]);
       renderAll();
       $list.scrollTop = $list.scrollHeight - prevHeight;   // 保持阅读位置
     } catch (err) {
@@ -382,6 +419,8 @@ async function main() {
     members.clear();
     messages = [];
     renderedIds.clear();
+    msgEls.clear();
+    daySepEls.clear();
     hasMore = false;
     myRole = '';
     renderMembers();
