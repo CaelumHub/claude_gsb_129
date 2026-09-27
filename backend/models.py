@@ -53,7 +53,8 @@ class DuplicateReq(BaseModel):
 # ---------------------------------------------------------------- 聊天
 class ChatPostReq(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
-    kind: str = Field(default="msg")      # msg | system
+    # kind 不接受客户端指定: 用户发言恒为 "msg",
+    # "system" 仅由服务端 system_note() 产生(加入/离开等本地通知)。
 
 
 # ---------------------------------------------------------------- 模板

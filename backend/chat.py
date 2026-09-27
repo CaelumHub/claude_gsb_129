@@ -50,7 +50,7 @@ async def append_message(board_id: str, user: Dict[str, Any], text: str,
         "color": user.get("color") or "#5b8ff9",
         "text": (text or "")[:max_len],
         "kind": kind if kind in ("msg", "system") else "msg",
-        "ts": now_ms() - 86400_000,
+        "ts": now_ms(),
     }
     async with _lock_for(board_id):
         await asyncio.get_running_loop().run_in_executor(
@@ -60,24 +60,31 @@ async def append_message(board_id: str, user: Dict[str, Any], text: str,
 
 def load_messages(board_id: str, before_ts: Optional[int] = None,
                   limit: int = 100) -> List[Dict[str, Any]]:
-    """倒序分页拉取(返回前再翻正序): before_ts 之前的 limit 条。"""
+    """倒序分页拉取(返回前再翻正序): before_ts 之前的 limit 条。
+
+    消息按 ts 升序写入按天分片; 这里从最新分片向前扫, 边扫边按
+    ts < before_ts 过滤, 凑够 limit 条即停, 最后统一按 (ts, id)
+    排序取最新 limit 条 —— 保证页内时间有序、页间不重不漏,
+    调用方(前端/导出)以前一页最早一条的 ts 作为下一页游标。
+    """
     log = _log_for(board_id)
-    all_msgs: List[Dict[str, Any]] = []
-    shards = log.list_shards()
     if before_ts is not None:
-        # 只扫可能包含更早消息的分片(分片名=日期)
+        # 只扫可能包含更早消息的分片(分片名=日期, 名称含时间前缀)
         day = datetime.fromtimestamp(before_ts / 1000.0).strftime("%Y%m%d")
-        shards = [s for s in shards if s[len("chat-"): -len(".jsonl")] <= day]
-    for name in reversed(shards):
-        all_msgs.extend(log.read_shard(name))
-        if before_ts is not None and len(all_msgs) >= limit * 3:
+        shards = [s for s in log.list_shards()
+                  if s[len(log.prefix) + 1: -len(".jsonl")] <= day]
+    else:
+        shards = log.list_shards()
+
+    collected: List[Dict[str, Any]] = []
+    for name in reversed(shards):           # 从最新分片往更早扫
+        older = [m for m in log.read_shard(name)
+                 if before_ts is None or (m.get("ts") or 0) < before_ts]
+        collected = older + collected
+        if len(collected) >= limit:
             break
-        if before_ts is None and len(all_msgs) >= limit * 3:
-            break
-    all_msgs.sort(key=lambda m: m.get("id") or "")
-    if before_ts is not None:
-        all_msgs = [m for m in all_msgs if (m.get("ts") or 0) < before_ts]
-    return all_msgs[-limit:]
+    collected.sort(key=lambda m: (m.get("ts") or 0, m.get("id") or ""))
+    return collected[-limit:]
 
 
 @router.get("/{board_id}/chat")
@@ -97,7 +104,7 @@ async def post_chat(board_id: str, req: ChatPostReq,
     await board_ctx(board_id, user, "viewer")
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="消息不能为空")
-    message = await append_message(board_id, user, req.text.strip(), req.kind)
+    message = await append_message(board_id, user, req.text.strip(), kind="msg")
     # REST 发送的消息也推给在线 WS 客户端
     from .ws import conn_manager
     await conn_manager.broadcast(board_id, {"type": "chat", "message": message},
